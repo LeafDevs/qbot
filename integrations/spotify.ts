@@ -2,6 +2,29 @@ import SpotifyWebApi from 'spotify-web-api-node';
 import fs from 'fs';
 import path from 'path';
 
+// Check if Spotify debug logging is muted
+function shouldMuteSpotifyDebug(): boolean {
+    return process.env.MUTE_SPOTIFY_DEBUG === 'true';
+}
+
+// Helper function for Spotify debug logs
+function spotifyLog(...args: any[]): void {
+    if (!shouldMuteSpotifyDebug()) {
+        console.log(...args);
+    }
+}
+
+function spotifyWarn(...args: any[]): void {
+    if (!shouldMuteSpotifyDebug()) {
+        console.warn(...args);
+    }
+}
+
+// Error logs should always show (not muted)
+function spotifyError(...args: any[]): void {
+    console.error(...args);
+}
+
 // Types
 export interface SpotifyUser {
     discordId: string;
@@ -243,7 +266,7 @@ export class SpotifyService {
         // Check if token needs refresh
         if (Date.now() >= user.expiresAt - 60000) { // Refresh 1 minute before expiry
             try {
-                console.log(`[Spotify] 🔑 Refreshing access token for user ${discordId}`);
+                spotifyLog(`[Spotify] 🔑 Refreshing access token for user ${discordId}`);
                 const data = await spotifyApi.refreshAccessToken();
                 const newAccessToken = data.body.access_token;
                 const expiresIn = data.body.expires_in;
@@ -255,9 +278,9 @@ export class SpotifyService {
                 saveUsers(this.users);
 
                 spotifyApi.setAccessToken(newAccessToken);
-                console.log(`[Spotify] ✅ Token refreshed successfully (expires in ${expiresIn}s)`);
+                spotifyLog(`[Spotify] ✅ Token refreshed successfully (expires in ${expiresIn}s)`);
             } catch (error) {
-                console.error(`[Spotify] ❌ Error refreshing token for user ${discordId}:`, error);
+                spotifyError(`[Spotify] ❌ Error refreshing token for user ${discordId}:`, error);
                 return null;
             }
         }
@@ -311,7 +334,7 @@ export class SpotifyService {
                     artistImageUrl = artistData.body.images?.[0]?.url;
                 } catch (error) {
                     // If fetching artist fails, continue without artist image
-                    console.warn(`[Spotify] Could not fetch artist image for ${artistId}:`, error);
+                    spotifyWarn(`[Spotify] Could not fetch artist image for ${artistId}:`, error);
                 }
             }
 
@@ -367,7 +390,7 @@ export class SpotifyService {
         if (userIds.length === 0) {
             return;
         }
-        console.log(`[Spotify] Polling ${userIds.length} user(s) for currently playing tracks`);
+        spotifyLog(`[Spotify] Polling ${userIds.length} user(s) for currently playing tracks`);
         const promises = userIds.map(id => this.getCurrentlyPlaying(id));
         await Promise.allSettled(promises);
     }

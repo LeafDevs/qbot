@@ -2,8 +2,31 @@ import type { Client, TextChannel, User } from "discord.js";
 import { getSpotifyService } from '../integrations/spotify.js';
 import { createTrackEmbed, createStatusMessage } from '../commands/spotify.js';
 
+// Check if Spotify debug logging is muted
+function shouldMuteSpotifyDebug(): boolean {
+    return process.env.MUTE_SPOTIFY_DEBUG === 'true';
+}
+
+// Helper function for Spotify debug logs
+function spotifyLog(...args: any[]): void {
+    if (!shouldMuteSpotifyDebug()) {
+        console.log(...args);
+    }
+}
+
+function spotifyWarn(...args: any[]): void {
+    if (!shouldMuteSpotifyDebug()) {
+        console.warn(...args);
+    }
+}
+
+// Error logs should always show (not muted)
+function spotifyError(...args: any[]): void {
+    console.error(...args);
+}
+
 // Polling interval in milliseconds (30 seconds)
-const POLLING_INTERVAL = 30000;
+const POLLING_INTERVAL = 3000;
 
 let pollingInterval: NodeJS.Timeout | null = null;
 let clientInstance: Client | null = null;
@@ -114,7 +137,7 @@ async function validatePersistedData(spotifyService: ReturnType<typeof getSpotif
 }
 
 async function pollAndUpdateChannels(spotifyService: ReturnType<typeof getSpotifyService>, client: Client) {
-    console.log(`[Spotify] Starting polling cycle at ${new Date().toISOString()}`);
+    spotifyLog(`[Spotify] Starting polling cycle at ${new Date().toISOString()}`);
     
     // Poll all users for currently playing tracks
     await spotifyService.pollAllUsers();
@@ -123,17 +146,17 @@ async function pollAndUpdateChannels(spotifyService: ReturnType<typeof getSpotif
     const channels = spotifyService.getAllChannels();
     
     if (channels.size === 0) {
-        console.log(`[Spotify] No channels configured, skipping update`);
+        spotifyLog(`[Spotify] No channels configured, skipping update`);
         return;
     }
     
-    console.log(`[Spotify] Updating ${channels.size} channel(s)`);
+    spotifyLog(`[Spotify] Updating ${channels.size} channel(s)`);
     
     for (const [discordId, channelId] of channels.entries()) {
         try {
             const channel = await client.channels.fetch(channelId) as TextChannel | null;
             if (!channel) {
-                console.warn(`[Spotify] Channel ${channelId} not found, removing from config`);
+                spotifyWarn(`[Spotify] Channel ${channelId} not found, removing from config`);
                 spotifyService.removeUserChannel(discordId);
                 continue;
             }
@@ -150,7 +173,7 @@ async function pollAndUpdateChannels(spotifyService: ReturnType<typeof getSpotif
                 try {
                     user = await client.users.fetch(discordId);
                 } catch (error) {
-                    console.error(`[Spotify] Error fetching user ${discordId}:`, error);
+                    spotifyError(`[Spotify] Error fetching user ${discordId}:`, error);
                     continue;
                 }
 
@@ -163,54 +186,54 @@ async function pollAndUpdateChannels(spotifyService: ReturnType<typeof getSpotif
                 
                 if (songChanged) {
                     // Song changed - always send a new message
-                    console.log(`[Spotify] 🎵 NEW SONG detected for ${user.tag} (${user.id})`);
-                    console.log(`[Spotify]   Previous: ${previousTrackId || 'none'}`);
-                    console.log(`[Spotify]   Current: ${currentTrackId}`);
-                    console.log(`[Spotify]   Channel: #${channel.name} (${channelId})`);
+                    spotifyLog(`[Spotify] 🎵 NEW SONG detected for ${user.tag} (${user.id})`);
+                    spotifyLog(`[Spotify]   Previous: ${previousTrackId || 'none'}`);
+                    spotifyLog(`[Spotify]   Current: ${currentTrackId}`);
+                    spotifyLog(`[Spotify]   Channel: #${channel.name} (${channelId})`);
                     
                     const newMessage = await channel.send({ content, embeds: [embed] });
                     spotifyService.setUserMessage(discordId, newMessage.id);
                     
-                    console.log(`[Spotify] ✅ Sent new message (ID: ${newMessage.id}) for "${track.name}" by ${track.artist}`);
+                    spotifyLog(`[Spotify] ✅ Sent new message (ID: ${newMessage.id}) for "${track.name}" by ${track.artist}`);
                 } else if (messageId) {
                     // Same song - edit existing message
                     try {
                         const message = await channel.messages.fetch(messageId);
                         await message.edit({ content, embeds: [embed] });
                         
-                        console.log(`[Spotify] 🔄 Updated message for ${user.tag} (${user.id})`);
-                        console.log(`[Spotify]   Song: "${track.name}" by ${track.artist}`);
-                        console.log(`[Spotify]   Progress: ${Math.floor((track.progress / track.duration) * 100)}% (${Math.floor(track.progress / 1000)}s / ${Math.floor(track.duration / 1000)}s)`);
-                        console.log(`[Spotify]   Message ID: ${messageId}`);
+                        spotifyLog(`[Spotify] 🔄 Updated message for ${user.tag} (${user.id})`);
+                        spotifyLog(`[Spotify]   Song: "${track.name}" by ${track.artist}`);
+                        spotifyLog(`[Spotify]   Progress: ${Math.floor((track.progress / track.duration) * 100)}% (${Math.floor(track.progress / 1000)}s / ${Math.floor(track.duration / 1000)}s)`);
+                        spotifyLog(`[Spotify]   Message ID: ${messageId}`);
                     } catch (error) {
                         // Message might have been deleted, send a new one
-                        console.warn(`[Spotify] ⚠️  Message ${messageId} not found for ${user.tag}, sending new message`);
+                        spotifyWarn(`[Spotify] ⚠️  Message ${messageId} not found for ${user.tag}, sending new message`);
                         const newMessage = await channel.send({ content, embeds: [embed] });
                         spotifyService.setUserMessage(discordId, newMessage.id);
-                        console.log(`[Spotify] ✅ Sent replacement message (ID: ${newMessage.id})`);
+                        spotifyLog(`[Spotify] ✅ Sent replacement message (ID: ${newMessage.id})`);
                     }
                 } else {
                     // No message ID - send new message (shouldn't happen if song hasn't changed, but handle it)
-                    console.log(`[Spotify] 📝 No message ID found for ${user.tag}, sending initial message`);
+                    spotifyLog(`[Spotify] 📝 No message ID found for ${user.tag}, sending initial message`);
                     const message = await channel.send({ content, embeds: [embed] });
                     spotifyService.setUserMessage(discordId, message.id);
-                    console.log(`[Spotify] ✅ Sent initial message (ID: ${message.id})`);
+                    spotifyLog(`[Spotify] ✅ Sent initial message (ID: ${message.id})`);
                 }
             } else {
                 // User is not playing anything
                 try {
                     const user = await client.users.fetch(discordId);
-                    console.log(`[Spotify] ⏸️  ${user.tag} (${user.id}) is not currently playing anything`);
+                    spotifyLog(`[Spotify] ⏸️  ${user.tag} (${user.id}) is not currently playing anything`);
                 } catch (error) {
-                    console.log(`[Spotify] ⏸️  User ${discordId} is not currently playing anything`);
+                    spotifyLog(`[Spotify] ⏸️  User ${discordId} is not currently playing anything`);
                 }
             }
         } catch (error) {
-            console.error(`[Spotify] ❌ Error updating channel for user ${discordId}:`, error);
+            spotifyError(`[Spotify] ❌ Error updating channel for user ${discordId}:`, error);
         }
     }
     
-    console.log(`[Spotify] Completed polling cycle`);
+    spotifyLog(`[Spotify] Completed polling cycle`);
 }
 
 // Cleanup on process exit
