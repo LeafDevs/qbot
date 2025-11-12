@@ -26,7 +26,7 @@ function spotifyError(...args: any[]): void {
 }
 
 // Polling interval in milliseconds (10 seconds)
-const POLLING_INTERVAL = 5000;
+const POLLING_INTERVAL = 2000;
 
 let pollingInterval: NodeJS.Timeout | null = null;
 let clientInstance: Client | null = null;
@@ -197,48 +197,75 @@ async function pollAndUpdateChannels(spotifyService: ReturnType<typeof getSpotif
                 const songChanged = !previousTrackId || previousTrackId !== currentTrackId;
                 
                 if (songChanged) {
-                    // Song changed - send a new message
                     spotifyLog(`[Spotify] 🎵 NEW SONG detected for ${user.tag} (${user.id})`);
                     spotifyLog(`[Spotify]   Previous: ${previousTrackId || 'none'}`);
                     spotifyLog(`[Spotify]   Current: ${currentTrackId}`);
-                    spotifyLog(`[Spotify]   Channel: #${channel.name} (${spotifyChannelId})`);
-                    
-                    // Check if it's a Drake song and roll for 5% chance to ping @everyone
-                    const isDrakeSong = track.artist.toLowerCase().includes('drake');
-                    const shouldPingEveryone = isDrakeSong && Math.random() < 0.05;
-                    
-                    // Prepare message content - add @everyone ping if Drake and rolled
-                    let messageContent = content;
-                    if (shouldPingEveryone) {
-                        messageContent = `@everyone look at this loser doing a drake and drive\n\n${content}`;
-                        spotifyLog(`[Spotify] 🎲 DRAKE DETECTED! Rolling ping... SUCCESS! Pinging @everyone`);
-                    }
-                    
-                    const newMessage = await channel.send({ content: messageContent, embeds: [embed] });
-                    spotifyService.setUserMessage(discordId, newMessage.id);
-                    
-                    spotifyLog(`[Spotify] ✅ Sent new message (ID: ${newMessage.id}) for "${track.name}" by ${track.artist}`);
-                } else if (messageId) {
-                    // Same song - edit existing message
+                }
+                
+                // Always try to edit existing message first
+                if (messageId) {
                     try {
                         const message = await channel.messages.fetch(messageId);
-                        await message.edit({ content, embeds: [embed] });
                         
-                        spotifyLog(`[Spotify] 🔄 Updated message for ${user.tag} (${user.id})`);
-                        spotifyLog(`[Spotify]   Song: "${track.name}" by ${track.artist}`);
-                        spotifyLog(`[Spotify]   Progress: ${Math.floor((track.progress / track.duration) * 100)}% (${Math.floor(track.progress / 1000)}s / ${Math.floor(track.duration / 1000)}s)`);
-                        spotifyLog(`[Spotify]   Message ID: ${messageId}`);
+                        // Check if it's a Drake song and roll for 5% chance to ping @everyone (only on song change)
+                        let messageContent = content;
+                        if (songChanged) {
+                            const isDrakeSong = track.artist.toLowerCase().includes('drake');
+                            const shouldPingEveryone = isDrakeSong && Math.random() < 0.05;
+                            
+                            if (shouldPingEveryone) {
+                                messageContent = `@everyone look at this loser doing a drake and drive\n\n${content}`;
+                                spotifyLog(`[Spotify] 🎲 DRAKE DETECTED! Rolling ping... SUCCESS! Pinging @everyone`);
+                            }
+                        }
+                        
+                        await message.edit({ content: messageContent, embeds: [embed] });
+                        
+                        if (songChanged) {
+                            spotifyLog(`[Spotify] ✅ Edited message (ID: ${messageId}) for new song "${track.name}" by ${track.artist}`);
+                        } else {
+                            spotifyLog(`[Spotify] 🔄 Updated message for ${user.tag} (${user.id})`);
+                            spotifyLog(`[Spotify]   Song: "${track.name}" by ${track.artist}`);
+                            spotifyLog(`[Spotify]   Progress: ${Math.floor((track.progress / track.duration) * 100)}% (${Math.floor(track.progress / 1000)}s / ${Math.floor(track.duration / 1000)}s)`);
+                            spotifyLog(`[Spotify]   Message ID: ${messageId}`);
+                        }
                     } catch (error) {
                         // Message might have been deleted, send a new one
                         spotifyWarn(`[Spotify] ⚠️  Message ${messageId} not found for ${user.tag}, sending new message`);
-                        const newMessage = await channel.send({ content, embeds: [embed] });
+                        
+                        // Check if it's a Drake song and roll for 5% chance to ping @everyone (only on song change)
+                        let messageContent = content;
+                        if (songChanged) {
+                            const isDrakeSong = track.artist.toLowerCase().includes('drake');
+                            const shouldPingEveryone = isDrakeSong && Math.random() < 0.05;
+                            
+                            if (shouldPingEveryone) {
+                                messageContent = `@everyone look at this loser doing a drake and drive\n\n${content}`;
+                                spotifyLog(`[Spotify] 🎲 DRAKE DETECTED! Rolling ping... SUCCESS! Pinging @everyone`);
+                            }
+                        }
+                        
+                        const newMessage = await channel.send({ content: messageContent, embeds: [embed] });
                         spotifyService.setUserMessage(discordId, newMessage.id);
                         spotifyLog(`[Spotify] ✅ Sent replacement message (ID: ${newMessage.id})`);
                     }
                 } else {
-                    // No message ID - send new message (shouldn't happen if song hasn't changed, but handle it)
+                    // No message ID - send initial message
                     spotifyLog(`[Spotify] 📝 No message ID found for ${user.tag}, sending initial message`);
-                    const message = await channel.send({ content, embeds: [embed] });
+                    
+                    // Check if it's a Drake song and roll for 5% chance to ping @everyone (only on song change)
+                    let messageContent = content;
+                    if (songChanged) {
+                        const isDrakeSong = track.artist.toLowerCase().includes('drake');
+                        const shouldPingEveryone = isDrakeSong && Math.random() < 0.05;
+                        
+                        if (shouldPingEveryone) {
+                            messageContent = `@everyone look at this loser doing a drake and drive\n\n${content}`;
+                            spotifyLog(`[Spotify] 🎲 DRAKE DETECTED! Rolling ping... SUCCESS! Pinging @everyone`);
+                        }
+                    }
+                    
+                    const message = await channel.send({ content: messageContent, embeds: [embed] });
                     spotifyService.setUserMessage(discordId, message.id);
                     spotifyLog(`[Spotify] ✅ Sent initial message (ID: ${message.id})`);
                 }

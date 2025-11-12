@@ -40,27 +40,6 @@ function formatErrorResponse(error: any): string {
     }
 }
 
-// Request throttling: Ensure max 1 request per 2 seconds to Spotify API
-class RequestThrottle {
-    private lastRequestTime: number = 0;
-    private readonly minDelay: number = 2000; // 2 seconds minimum between requests
-
-    async throttle<T>(requestFn: () => Promise<T>): Promise<T> {
-        const now = Date.now();
-        const timeSinceLastRequest = now - this.lastRequestTime;
-        
-        if (timeSinceLastRequest < this.minDelay) {
-            const waitTime = this.minDelay - timeSinceLastRequest;
-            await new Promise(resolve => setTimeout(resolve, waitTime));
-        }
-        
-        this.lastRequestTime = Date.now();
-        return await requestFn();
-    }
-}
-
-// Global request throttle instance
-const requestThrottle = new RequestThrottle();
 
 // Types
 export interface SpotifyUser {
@@ -303,7 +282,7 @@ export class SpotifyService {
 
         try {
             spotifyLog(`[Spotify] 🔑 Refreshing access token for user ${discordId}`);
-            const data = await requestThrottle.throttle(() => spotifyApi.refreshAccessToken());
+            const data = await spotifyApi.refreshAccessToken();
             const newAccessToken = data.body.access_token;
             const expiresIn = data.body.expires_in;
 
@@ -375,35 +354,12 @@ export class SpotifyService {
         }
 
         try {
-            let response;
-            try {
-                response = await requestThrottle.throttle(() => {
-                    if (!api) throw new Error('API instance is null');
-                    return api.getMyCurrentPlayingTrack();
-                });
-            } catch (throttleError: any) {
-                // If error happens in throttle wrapper, check if it's a 403
-                const throttleStatusCode = throttleError.statusCode || throttleError.status;
-                if (throttleStatusCode === 403) {
-                    spotifyWarn(`[Spotify] Got 403 error in throttle wrapper for user ${discordId}, attempting token refresh...`);
-                    const refreshed = await this.refreshUserToken(discordId);
-                    if (refreshed) {
-                        api = await this.getUserApi(discordId);
-                        if (api) {
-                            response = await requestThrottle.throttle(() => {
-                                if (!api) throw new Error('API instance is null');
-                                return api.getMyCurrentPlayingTrack();
-                            });
-                        } else {
-                            return null;
-                        }
-                    } else {
-                        return null;
-                    }
-                } else {
-                    throw throttleError; // Re-throw if not 403
-                }
+            if (!api) {
+                spotifyWarn(`[Spotify] API instance is null for user ${discordId}`);
+                return null;
             }
+            
+            let response = await api.getMyCurrentPlayingTrack();
             
             // Log response details for debugging
             spotifyLog(`[Spotify] API response for user ${discordId}:`, {
@@ -471,12 +427,9 @@ export class SpotifyService {
             
             // Fetch artist details to get profile image
             let artistImageUrl: string | undefined;
-            if (artistId) {
+            if (artistId && api) {
                 try {
-                    const artistData = await requestThrottle.throttle(() => {
-                        if (!api) throw new Error('API instance is null');
-                        return api.getArtist(artistId);
-                    });
+                    const artistData = await api.getArtist(artistId);
                     artistImageUrl = artistData.body.images?.[0]?.url;
                 } catch (error: any) {
                     // Handle rate limiting (429) - skip artist image if rate limited
@@ -552,10 +505,7 @@ export class SpotifyService {
                         if (!api) {
                             return null;
                         }
-                        const retryResponse = await requestThrottle.throttle(() => {
-                            if (!api) throw new Error('API instance is null');
-                            return api.getMyCurrentPlayingTrack();
-                        });
+                        const retryResponse = await api.getMyCurrentPlayingTrack();
                         
                         spotifyLog(`[Spotify] Retry API response for user ${discordId}:`, {
                             statusCode: retryResponse.statusCode,
@@ -605,12 +555,9 @@ export class SpotifyService {
                         const artistId = primaryArtist?.id;
                         
                         let artistImageUrl: string | undefined;
-                        if (artistId) {
+                        if (artistId && api) {
                             try {
-                                const artistData = await requestThrottle.throttle(() => {
-                                    if (!api) throw new Error('API instance is null');
-                                    return api.getArtist(artistId);
-                                });
+                                const artistData = await api.getArtist(artistId);
                                 artistImageUrl = artistData.body.images?.[0]?.url;
                             } catch (artistError: any) {
                                 // Handle rate limiting (429) - skip artist image if rate limited
@@ -688,10 +635,7 @@ export class SpotifyService {
                     try {
                         api = await this.getUserApi(discordId);
                         if (api) {
-                            const finalRetry = await requestThrottle.throttle(() => {
-                                if (!api) throw new Error('API instance is null');
-                                return api.getMyCurrentPlayingTrack();
-                            });
+                            const finalRetry = await api.getMyCurrentPlayingTrack();
                             
                             if (finalRetry.body?.item && finalRetry.body.item.type === 'track') {
                                 const item = finalRetry.body.item;
@@ -743,20 +687,26 @@ export class SpotifyService {
     }
 
     // Poll all users for currently playing tracks
-    // Requests are automatically throttled to 1 per 2 seconds via RequestThrottle
+    // Adds a small delay between requests to avoid rate limiting
     async pollAllUsers(): Promise<void> {
         const userIds = Array.from(this.users.keys());
         if (userIds.length === 0) {
             return;
         }
-        spotifyLog(`[Spotify] Polling ${userIds.length} user(s) for currently playing tracks (throttled to 1 request per 2s)`);
+        spotifyLog(`[Spotify] Polling ${userIds.length} user(s) for currently playing tracks`);
         
-        // Process users sequentially - throttle handles timing automatically
-        for (const userId of userIds) {
+        // Process users sequentially with a small delay between requests
+        for (let i = 0; i < userIds.length; i++) {
+            const userId = userIds[i];
             if (!userId) continue;
             
             try {
                 await this.getCurrentlyPlaying(userId);
+                
+                // Add a small delay between requests (except after the last one)
+                if (i < userIds.length - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 500)); // 500ms delay
+                }
             } catch (error: any) {
                 spotifyError(`[Spotify] Error polling user ${userId}:`);
                 spotifyError(`[Spotify] Full error response:\n${formatErrorResponse(error)}`);
@@ -837,12 +787,9 @@ export class SpotifyService {
         }
 
         try {
-            const response = await requestThrottle.throttle(() => {
-                if (!api) throw new Error('API instance is null');
-                return api.getMyTopTracks({
-                    time_range: timeRange,
-                    limit: limit,
-                });
+            const response = await api.getMyTopTracks({
+                time_range: timeRange,
+                limit: limit,
             });
 
             if (!response.body.items || response.body.items.length === 0) {
@@ -872,12 +819,9 @@ export class SpotifyService {
                         if (!api) {
                             return null;
                         }
-                        const retryResponse = await requestThrottle.throttle(() => {
-                            if (!api) throw new Error('API instance is null');
-                            return api.getMyTopTracks({
-                                time_range: timeRange,
-                                limit: limit,
-                            });
+                        const retryResponse = await api.getMyTopTracks({
+                            time_range: timeRange,
+                            limit: limit,
                         });
 
                         if (!retryResponse.body.items || retryResponse.body.items.length === 0) {
