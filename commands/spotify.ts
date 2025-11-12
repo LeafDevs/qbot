@@ -36,11 +36,11 @@ export default {
         .addSubcommand(subcommand =>
             subcommand
                 .setName('channel')
-                .setDescription('Set the channel where your Spotify status will be displayed')
+                .setDescription('Set the shared Spotify channel where all users\' Spotify statuses will be displayed')
                 .addChannelOption(option =>
                     option
                         .setName('channel')
-                        .setDescription('The channel to display your Spotify status in')
+                        .setDescription('The channel to display Spotify statuses in (shared for all users)')
                         .setRequired(true)
                 )
         )
@@ -48,6 +48,22 @@ export default {
             subcommand
                 .setName('remove-channel')
                 .setDescription('Remove the channel where your Spotify status is displayed')
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('top-tracks')
+                .setDescription('View your top 10 Spotify tracks')
+                .addStringOption(option =>
+                    option
+                        .setName('period')
+                        .setDescription('Time period for top tracks')
+                        .setRequired(true)
+                        .addChoices(
+                            { name: 'All Time', value: 'long_term' },
+                            { name: 'This Year', value: 'medium_term' },
+                            { name: 'This Month', value: 'short_term' }
+                        )
+                )
         ),
     async execute(interaction: ChatInputCommandInteraction, client: Client) {
         const subcommand = interaction.options.getSubcommand();
@@ -73,6 +89,9 @@ export default {
                     break;
                 case 'remove-channel':
                     await handleRemoveChannel(interaction, spotifyService, discordId);
+                    break;
+                case 'top-tracks':
+                    await handleTopTracks(interaction, spotifyService, discordId);
                     break;
             }
         } catch (error) {
@@ -196,6 +215,18 @@ async function handleComplete(interaction: ChatInputCommandInteraction, spotifyS
 }
 
 async function handleChannel(interaction: ChatInputCommandInteraction, spotifyService: ReturnType<typeof getSpotifyService>, discordId: string, client: Client) {
+    // Check if user is an admin
+    const adminsEnv = process.env.ADMINS;
+    const admins = adminsEnv ? adminsEnv.split(',').map(id => id.trim()) : [];
+    
+    if (!admins.includes(discordId)) {
+        await interaction.reply({
+            content: '❌ Only admins can set the Spotify channel.',
+            ephemeral: true,
+        });
+        return;
+    }
+    
     if (!spotifyService.isLinked(discordId)) {
         await interaction.reply({
             content: 'Your Spotify account is not linked. Use `/spotify link` to link it first.',
@@ -226,10 +257,11 @@ async function handleChannel(interaction: ChatInputCommandInteraction, spotifySe
         return;
     }
 
+    // Set the channel (this becomes the shared Spotify channel for all users)
     spotifyService.setUserChannel(discordId, channel.id);
     
     await interaction.reply({
-        content: `✅ Your Spotify status will now be displayed in ${channel}. It will update every 30 seconds.`,
+        content: `✅ The Spotify channel has been set to ${channel}. All users' Spotify statuses will be displayed here and update every 30 seconds.`,
         ephemeral: true,
     });
 
@@ -244,19 +276,70 @@ async function handleChannel(interaction: ChatInputCommandInteraction, spotifySe
 }
 
 async function handleRemoveChannel(interaction: ChatInputCommandInteraction, spotifyService: ReturnType<typeof getSpotifyService>, discordId: string) {
+    // Check if user is an admin
+    const adminsEnv = process.env.ADMINS;
+    const admins = adminsEnv ? adminsEnv.split(',').map(id => id.trim()) : [];
+    
+    if (!admins.includes(discordId)) {
+        await interaction.reply({
+            content: '❌ Only admins can remove the Spotify channel.',
+            ephemeral: true,
+        });
+        return;
+    }
+    
     const removed = spotifyService.removeUserChannel(discordId);
     
     if (removed) {
         await interaction.reply({
-            content: '✅ Removed your Spotify status channel.',
+            content: '✅ Removed the Spotify status channel.',
             ephemeral: true,
         });
     } else {
         await interaction.reply({
-            content: 'You don\'t have a Spotify status channel set.',
+            content: 'No Spotify status channel is currently set.',
             ephemeral: true,
         });
     }
+}
+
+async function handleTopTracks(interaction: ChatInputCommandInteraction, spotifyService: ReturnType<typeof getSpotifyService>, discordId: string) {
+    if (!spotifyService.isLinked(discordId)) {
+        await interaction.reply({
+            content: 'Your Spotify account is not linked. Use `/spotify link` to link it.',
+            ephemeral: true,
+        });
+        return;
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+
+    const period = interaction.options.getString('period', true) as 'short_term' | 'medium_term' | 'long_term';
+    
+    const periodNames = {
+        'short_term': 'This Month',
+        'medium_term': 'This Year',
+        'long_term': 'All Time',
+    };
+
+    const tracks = await spotifyService.getTopTracks(discordId, period, 10);
+
+    if (tracks === null) {
+        await interaction.editReply({
+            content: '❌ Failed to fetch your top tracks. Please try again later.',
+        });
+        return;
+    }
+
+    if (tracks.length === 0) {
+        await interaction.editReply({
+            content: `You don't have enough listening data for ${periodNames[period].toLowerCase()} yet. Keep listening to build your top tracks!`,
+        });
+        return;
+    }
+
+    const embed = createTopTracksEmbed(tracks, interaction.user, periodNames[period]);
+    await interaction.editReply({ embeds: [embed] });
 }
 
 export function createStatusMessage(user: User, track: { name: string; artist: string }): string {
@@ -296,5 +379,32 @@ function formatTime(ms: number): string {
     const minutes = Math.floor(seconds / 60);
     const remainingSeconds = seconds % 60;
     return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+}
+
+function createTopTracksEmbed(tracks: Array<{ name: string; artist: string; album: string; url: string; imageUrl?: string; popularity: number }>, user: User, periodName: string): EmbedBuilder {
+    const embed = new EmbedBuilder()
+        .setColor(0x1DB954) // Spotify green
+        .setAuthor({
+            name: `${user.displayName || user.username}'s Top Tracks`,
+            iconURL: user.displayAvatarURL({ extension: 'png', size: 128 }),
+        })
+        .setTitle(`🎵 Top 10 Tracks - ${periodName}`)
+        .setTimestamp()
+        .setFooter({ text: 'Spotify Top Tracks' });
+
+    // Build the track list
+    const trackList = tracks.map((track, index) => {
+        const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
+        return `${medal} **[${track.name}](${track.url})**\n   ${track.artist} • ${track.album}`;
+    }).join('\n\n');
+
+    embed.setDescription(trackList);
+
+    // Set thumbnail to the first track's album art if available
+    if (tracks[0]?.imageUrl) {
+        embed.setThumbnail(tracks[0].imageUrl);
+    }
+
+    return embed;
 }
 

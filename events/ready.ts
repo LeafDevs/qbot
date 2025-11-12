@@ -25,8 +25,8 @@ function spotifyError(...args: any[]): void {
     console.error(...args);
 }
 
-// Polling interval in milliseconds (30 seconds)
-const POLLING_INTERVAL = 3000;
+// Polling interval in milliseconds (5 seconds)
+const POLLING_INTERVAL = 5000;
 
 let pollingInterval: NodeJS.Timeout | null = null;
 let clientInstance: Client | null = null;
@@ -75,20 +75,14 @@ async function validatePersistedData(spotifyService: ReturnType<typeof getSpotif
     let cleanedMessages = 0;
     
     // Check each configured channel
+    // Note: In shared channel architecture, channel config persists independently of user link status
+    // We only validate that the channel exists in Discord
     for (const [discordId, channelId] of channels.entries()) {
         try {
-            // Check if user is still linked
-            if (!spotifyService.isLinked(discordId)) {
-                console.log(`User ${discordId} is no longer linked, removing channel config`);
-                spotifyService.removeUserChannel(discordId);
-                cleanedChannels++;
-                continue;
-            }
-            
             // Check if channel still exists
             const channel = await client.channels.fetch(channelId) as TextChannel | null;
             if (!channel) {
-                console.log(`Channel ${channelId} not found, removing config for user ${discordId}`);
+                console.log(`Channel ${channelId} not found, removing config`);
                 spotifyService.removeUserChannel(discordId);
                 cleanedChannels++;
                 continue;
@@ -139,32 +133,49 @@ async function validatePersistedData(spotifyService: ReturnType<typeof getSpotif
 async function pollAndUpdateChannels(spotifyService: ReturnType<typeof getSpotifyService>, client: Client) {
     spotifyLog(`[Spotify] Starting polling cycle at ${new Date().toISOString()}`);
     
-    // Poll all users for currently playing tracks
-    await spotifyService.pollAllUsers();
+    // Get the shared Spotify channel (uses first user's channel)
+    const spotifyChannelId = spotifyService.getSpotifyChannel();
     
-    // Update channel messages for users with channels configured
-    const channels = spotifyService.getAllChannels();
-    
-    if (channels.size === 0) {
-        spotifyLog(`[Spotify] No channels configured, skipping update`);
+    if (!spotifyChannelId) {
+        spotifyLog(`[Spotify] No Spotify channel configured, skipping update`);
         return;
     }
     
-    spotifyLog(`[Spotify] Updating ${channels.size} channel(s)`);
+    // Get all linked users
+    const linkedUsers = spotifyService.getAllLinkedUsers();
     
-    for (const [discordId, channelId] of channels.entries()) {
+    if (linkedUsers.length === 0) {
+        spotifyLog(`[Spotify] No linked users, skipping update`);
+        return;
+    }
+    
+    // Get previous track IDs BEFORE polling (which updates them)
+    const previousTrackIds = new Map<string, string | undefined>();
+    for (const discordId of linkedUsers) {
+        previousTrackIds.set(discordId, spotifyService.getLastTrackId(discordId));
+    }
+    
+    // Poll all users for currently playing tracks
+    await spotifyService.pollAllUsers();
+    
+    // Fetch the shared Spotify channel
+    const channel = await client.channels.fetch(spotifyChannelId) as TextChannel | null;
+    if (!channel) {
+        spotifyWarn(`[Spotify] Spotify channel ${spotifyChannelId} not found`);
+        return;
+    }
+    
+    spotifyLog(`[Spotify] Updating Spotify channel for ${linkedUsers.length} user(s)`);
+    
+    // Update messages for all linked users in the shared channel
+    for (const discordId of linkedUsers) {
         try {
-            const channel = await client.channels.fetch(channelId) as TextChannel | null;
-            if (!channel) {
-                spotifyWarn(`[Spotify] Channel ${channelId} not found, removing from config`);
-                spotifyService.removeUserChannel(discordId);
-                continue;
-            }
-
-            // Get previous track ID BEFORE calling getCurrentlyPlaying (which updates it)
-            const previousTrackId = spotifyService.getLastTrackId(discordId);
+            // Get the previous track ID we captured BEFORE polling
+            const previousTrackId = previousTrackIds.get(discordId);
             
-            const track = await spotifyService.getCurrentlyPlaying(discordId);
+            // Get current track (already polled, but we need the track object)
+            const currentlyPlaying = spotifyService.getAllCurrentlyPlaying().get(discordId);
+            const track = currentlyPlaying?.track || null;
             const messageId = spotifyService.getUserMessage(discordId);
 
             if (track) {
@@ -180,18 +191,30 @@ async function pollAndUpdateChannels(spotifyService: ReturnType<typeof getSpotif
                 const embed = createTrackEmbed(track, user);
                 const content = createStatusMessage(user, track);
                 
-                // Check if song changed by comparing with previous track ID
+                // Check if song changed by comparing full track ID (name|artist format)
+                // previousTrackId is stored as "name|artist"
                 const currentTrackId = `${track.name}|${track.artist}`;
                 const songChanged = !previousTrackId || previousTrackId !== currentTrackId;
                 
                 if (songChanged) {
-                    // Song changed - always send a new message
+                    // Song changed - send a new message
                     spotifyLog(`[Spotify] 🎵 NEW SONG detected for ${user.tag} (${user.id})`);
                     spotifyLog(`[Spotify]   Previous: ${previousTrackId || 'none'}`);
                     spotifyLog(`[Spotify]   Current: ${currentTrackId}`);
-                    spotifyLog(`[Spotify]   Channel: #${channel.name} (${channelId})`);
+                    spotifyLog(`[Spotify]   Channel: #${channel.name} (${spotifyChannelId})`);
                     
-                    const newMessage = await channel.send({ content, embeds: [embed] });
+                    // Check if it's a Drake song and roll for 5% chance to ping @everyone
+                    const isDrakeSong = track.artist.toLowerCase().includes('drake');
+                    const shouldPingEveryone = isDrakeSong && Math.random() < 0.05;
+                    
+                    // Prepare message content - add @everyone ping if Drake and rolled
+                    let messageContent = content;
+                    if (shouldPingEveryone) {
+                        messageContent = `@everyone look at this loser doing a drake and drive\n\n${content}`;
+                        spotifyLog(`[Spotify] 🎲 DRAKE DETECTED! Rolling ping... SUCCESS! Pinging @everyone`);
+                    }
+                    
+                    const newMessage = await channel.send({ content: messageContent, embeds: [embed] });
                     spotifyService.setUserMessage(discordId, newMessage.id);
                     
                     spotifyLog(`[Spotify] ✅ Sent new message (ID: ${newMessage.id}) for "${track.name}" by ${track.artist}`);
