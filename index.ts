@@ -3,6 +3,9 @@ import path from 'path';
 import fs from 'fs';
 import { table } from 'console';
 
+// Initialize Spotify OAuth callback server (if configured)
+import './integrations/spotify-oauth.js';
+
 // Config - Set your Discord Bot Token and Client ID here
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
