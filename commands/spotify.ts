@@ -165,7 +165,7 @@ async function handleStatus(interaction: ChatInputCommandInteraction, spotifySer
         return;
     }
 
-    const embed = createTrackEmbed(track, interaction.user.id);
+    const embed = createTrackEmbed(track, interaction.user);
     await interaction.editReply({ embeds: [embed] });
 }
 
@@ -236,7 +236,7 @@ async function handleChannel(interaction: ChatInputCommandInteraction, spotifySe
     // Send initial status
     const track = await spotifyService.getCurrentlyPlaying(discordId);
     if (track) {
-        const embed = createTrackEmbed(track, interaction.user.id);
+        const embed = createTrackEmbed(track, interaction.user);
         const content = createStatusMessage(interaction.user, track);
         const message = await textChannel.send({ content, embeds: [embed] });
         spotifyService.setUserMessage(discordId, message.id);
@@ -265,8 +265,7 @@ export function createStatusMessage(user: User, track: { name: string; artist: s
     return `${userName} is listening to **${track.name}** by ${track.artist}`;
 }
 
-export function createTrackEmbed(track: { name: string; artist: string; album?: string; url: string; imageUrl?: string; duration: number; progress: number; isPlaying: boolean }, userId: string): EmbedBuilder {
-    const progressBar = createProgressBar(track.progress, track.duration);
+export function createTrackEmbed(track: { name: string; artist: string; album?: string; url: string; imageUrl?: string; duration: number; progress: number; isPlaying: boolean }, user: User): EmbedBuilder {
     const statusEmoji = track.isPlaying ? '▶️' : '⏸️';
     const progressPercent = Math.floor((track.progress / track.duration) * 100);
 
@@ -274,7 +273,7 @@ export function createTrackEmbed(track: { name: string; artist: string; album?: 
         .setColor(0x1DB954) // Spotify green
         .setAuthor({ 
             name: 'Now Playing on Spotify',
-            iconURL: 'https://cdn.jsdelivr.net/npm/simple-icons@v9/icons/spotify.svg'
+            iconURL: user.displayAvatarURL({ extension: 'png', size: 128 })
         })
         .setTitle(track.name)
         .setDescription(`**${track.artist}**${track.album ? ` • ${track.album}` : ''}`)
@@ -289,20 +288,7 @@ export function createTrackEmbed(track: { name: string; artist: string; album?: 
         embed.setThumbnail(track.imageUrl);
     }
 
-    // Add progress bar as a field with emoji
-    embed.addFields({
-        name: `${statusEmoji} Progress`,
-        value: `\`${progressBar}\` \`${formatTime(track.progress)} / ${formatTime(track.duration)}\``,
-        inline: false,
-    });
-
     return embed;
-}
-
-function createProgressBar(current: number, total: number, length: number = 20): string {
-    const filled = Math.floor((current / total) * length);
-    const empty = length - filled;
-    return '█'.repeat(filled) + '░'.repeat(empty);
 }
 
 function formatTime(ms: number): string {

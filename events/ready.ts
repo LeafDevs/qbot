@@ -154,7 +154,7 @@ async function pollAndUpdateChannels(spotifyService: ReturnType<typeof getSpotif
                     continue;
                 }
 
-                const embed = createTrackEmbed(track, discordId);
+                const embed = createTrackEmbed(track, user);
                 const content = createStatusMessage(user, track);
                 
                 // Check if song changed by comparing with previous track ID
