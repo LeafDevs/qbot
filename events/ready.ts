@@ -25,7 +25,7 @@ function spotifyError(...args: any[]): void {
     console.error(...args);
 }
 
-// Polling interval in milliseconds (5 seconds)
+// Polling interval in milliseconds (10 seconds)
 const POLLING_INTERVAL = 5000;
 
 let pollingInterval: NodeJS.Timeout | null = null;
