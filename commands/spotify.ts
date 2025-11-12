@@ -265,7 +265,7 @@ export function createStatusMessage(user: User, track: { name: string; artist: s
     return `${userName} is listening to **${track.name}** by ${track.artist}`;
 }
 
-export function createTrackEmbed(track: { name: string; artist: string; album?: string; url: string; imageUrl?: string; duration: number; progress: number; isPlaying: boolean }, user: User): EmbedBuilder {
+export function createTrackEmbed(track: { name: string; artist: string; artistImageUrl?: string; album?: string; url: string; imageUrl?: string; duration: number; progress: number; isPlaying: boolean }, user: User): EmbedBuilder {
     const statusEmoji = track.isPlaying ? '▶️' : '⏸️';
     const progressPercent = Math.floor((track.progress / track.duration) * 100);
 
@@ -280,7 +280,7 @@ export function createTrackEmbed(track: { name: string; artist: string; album?: 
         .setURL(track.url)
         .setFooter({ 
             text: `${formatTime(track.progress)} / ${formatTime(track.duration)} • ${progressPercent}% • ${track.isPlaying ? 'Playing' : 'Paused'}`,
-            iconURL: 'https://cdn.jsdelivr.net/npm/simple-icons@v9/icons/spotify.svg'
+            iconURL: track.artistImageUrl || 'https://cdn.jsdelivr.net/npm/simple-icons@v9/icons/spotify.svg'
         })
         .setTimestamp();
 

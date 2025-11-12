@@ -16,6 +16,8 @@ export interface CurrentlyPlaying {
     track?: {
         name: string;
         artist: string;
+        artistId?: string; // Primary artist ID for fetching artist image
+        artistImageUrl?: string; // Primary artist profile image
         album?: string;
         url: string;
         imageUrl?: string;
@@ -298,9 +300,26 @@ export class SpotifyService {
                 return null;
             }
 
+            const primaryArtist = item.artists[0];
+            const artistId = primaryArtist?.id;
+            
+            // Fetch artist details to get profile image
+            let artistImageUrl: string | undefined;
+            if (artistId) {
+                try {
+                    const artistData = await api.getArtist(artistId);
+                    artistImageUrl = artistData.body.images?.[0]?.url;
+                } catch (error) {
+                    // If fetching artist fails, continue without artist image
+                    console.warn(`[Spotify] Could not fetch artist image for ${artistId}:`, error);
+                }
+            }
+
             const track = {
                 name: item.name,
                 artist: item.artists.map((a: { name: string }) => a.name).join(', '),
+                artistId: artistId,
+                artistImageUrl: artistImageUrl,
                 album: item.album?.name,
                 url: item.external_urls.spotify,
                 imageUrl: item.album?.images?.[0]?.url,
