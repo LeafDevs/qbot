@@ -3,6 +3,121 @@ import { getSpotifyService } from '../integrations/spotify.js';
 import { addState } from '../integrations/spotify-oauth.js';
 import crypto from 'crypto';
 
+// Sound visualizer GIF URL - you can replace this with your own visualizer GIF
+// Some options:
+// - Upload your own visualizer GIF to imgur/imgbb/etc
+// - Use: https://i.imgur.com/your-gif-id.gif
+// - Or use a service that generates visualizers
+const VISUALIZER_GIF_URL = 'https://i.imgur.com/8Z7XK9L.gif'; // Placeholder - replace with your visualizer GIF
+
+// Extract dominant color from image URL using a color extraction API
+// We'll use a simple approach: fetch image and use color-thief-like algorithm
+async function getDominantColor(imageUrl: string): Promise<number> {
+    try {
+        // Use a color extraction API service
+        // For now, we'll use a simple hash-based approach that gives consistent colors
+        // In production, you might want to use a proper image processing library
+        
+        // Fetch the image to get some data
+        const response = await fetch(imageUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0'
+            }
+        });
+        
+        if (!response.ok) {
+            return 0x1DB954; // Default Spotify green if fetch fails
+        }
+        
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        
+        // Use a color extraction algorithm
+        // Sample colors from different parts of the image buffer
+        // This is a simplified approach - for better results, decode the actual image
+        
+        // Get colors from different positions in the buffer
+        const samples: number[] = [];
+        const sampleSize = Math.min(buffer.length, 10000); // Sample first 10KB
+        
+        for (let i = 0; i < sampleSize - 2; i += 3) {
+            const r = buffer[i] || 0;
+            const g = buffer[i + 1] || 0;
+            const b = buffer[i + 2] || 0;
+            
+            // Skip very dark or very light pixels
+            const brightness = (r + g + b) / 3;
+            if (brightness > 20 && brightness < 240) {
+                samples.push((r << 16) | (g << 8) | b);
+            }
+        }
+        
+        if (samples.length === 0) {
+            return 0x1DB954; // Default if no good samples
+        }
+        
+        // Find the most common color bucket
+        const colorBuckets = new Map<number, number>();
+        const bucketSize = 16; // Group similar colors together
+        
+        for (const color of samples) {
+            const r = (color >> 16) & 0xFF;
+            const g = (color >> 8) & 0xFF;
+            const b = color & 0xFF;
+            
+            // Quantize colors into buckets
+            const rBucket = Math.floor(r / bucketSize) * bucketSize;
+            const gBucket = Math.floor(g / bucketSize) * bucketSize;
+            const bBucket = Math.floor(b / bucketSize) * bucketSize;
+            
+            const bucketKey = (rBucket << 16) | (gBucket << 8) | bBucket;
+            colorBuckets.set(bucketKey, (colorBuckets.get(bucketKey) || 0) + 1);
+        }
+        
+        // Find the most common bucket
+        let maxCount = 0;
+        let dominantColor = 0x1DB954;
+        
+        for (const [color, count] of colorBuckets.entries()) {
+            if (count > maxCount) {
+                maxCount = count;
+                dominantColor = color;
+            }
+        }
+        
+        // Ensure the color is vibrant enough
+        const r = (dominantColor >> 16) & 0xFF;
+        const g = (dominantColor >> 8) & 0xFF;
+        const b = dominantColor & 0xFF;
+        
+        const brightness = (r + g + b) / 3;
+        const saturation = Math.max(r, g, b) - Math.min(r, g, b);
+        
+        // If color is too dark, lighten it; if too light, darken it
+        if (brightness < 50) {
+            // Too dark, brighten it
+            const factor = 50 / brightness;
+            dominantColor = (
+                (Math.min(255, Math.floor(r * factor)) << 16) |
+                (Math.min(255, Math.floor(g * factor)) << 8) |
+                Math.min(255, Math.floor(b * factor))
+            );
+        } else if (brightness > 200 && saturation < 30) {
+            // Too light and not saturated, darken it
+            dominantColor = (
+                (Math.floor(r * 0.7) << 16) |
+                (Math.floor(g * 0.7) << 8) |
+                Math.floor(b * 0.7)
+            );
+        }
+        
+        return dominantColor;
+    } catch (error) {
+        console.error('Error extracting dominant color:', error);
+        return 0x1DB954; // Default Spotify green
+    }
+}
+
 export default {
     data: new SlashCommandBuilder()
         .setName('spotify')
@@ -184,7 +299,7 @@ async function handleStatus(interaction: ChatInputCommandInteraction, spotifySer
         return;
     }
 
-    const embed = createTrackEmbed(track, interaction.user);
+    const embed = await createTrackEmbed(track, interaction.user);
     await interaction.editReply({ embeds: [embed] });
 }
 
@@ -268,7 +383,7 @@ async function handleChannel(interaction: ChatInputCommandInteraction, spotifySe
     // Send initial status
     const track = await spotifyService.getCurrentlyPlaying(discordId);
     if (track) {
-        const embed = createTrackEmbed(track, interaction.user);
+        const embed = await createTrackEmbed(track, interaction.user);
         const content = createStatusMessage(interaction.user, track);
         const message = await textChannel.send({ content, embeds: [embed] });
         spotifyService.setUserMessage(discordId, message.id);
@@ -348,12 +463,22 @@ export function createStatusMessage(user: User, track: { name: string; artist: s
     return `${userName} is listening to **${track.name}** by ${track.artist}`;
 }
 
-export function createTrackEmbed(track: { name: string; artist: string; artistImageUrl?: string; album?: string; url: string; imageUrl?: string; duration: number; progress: number; isPlaying: boolean }, user: User): EmbedBuilder {
+export async function createTrackEmbed(track: { name: string; artist: string; artistImageUrl?: string; album?: string; url: string; imageUrl?: string; duration: number; progress: number; isPlaying: boolean }, user: User): Promise<EmbedBuilder> {
     const statusEmoji = track.isPlaying ? '▶️' : '⏸️';
     const progressPercent = Math.floor((track.progress / track.duration) * 100);
 
+    // Extract dominant color from album cover, fallback to Spotify green
+    let embedColor = 0x1DB954; // Default Spotify green
+    if (track.imageUrl) {
+        try {
+            embedColor = await getDominantColor(track.imageUrl);
+        } catch (error) {
+            console.error('Error getting dominant color:', error);
+        }
+    }
+
     const embed = new EmbedBuilder()
-        .setColor(0x1DB954) // Spotify green
+        .setColor(embedColor)
         .setAuthor({ 
             name: 'Now Playing on Spotify',
             iconURL: user.displayAvatarURL({ extension: 'png', size: 128 })

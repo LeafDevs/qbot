@@ -25,21 +25,103 @@ function spotifyError(...args: any[]): void {
     console.error(...args);
 }
 
-// Helper function to format full error response for logging
-function formatErrorResponse(error: any): string {
-    try {
-        return JSON.stringify({
-            statusCode: error.statusCode,
-            message: error.message,
-            body: error.body,
-            headers: error.headers,
-            stack: error.stack,
-        }, null, 2);
-    } catch {
-        return String(error);
+// Helper function to safely extract error message as string
+function getErrorMessage(error: any): string {
+    // Helper to safely stringify objects, avoiding [object Object]
+    const safeStringify = (obj: any): string | null => {
+        if (obj === null || obj === undefined) return null;
+        if (typeof obj === 'string') return obj;
+        if (typeof obj !== 'object') return String(obj);
+        
+        try {
+            // Use a replacer to handle circular references and functions
+            const seen = new WeakSet();
+            const stringified = JSON.stringify(obj, (key, value) => {
+                if (typeof value === 'object' && value !== null) {
+                    if (seen.has(value)) {
+                        return '[Circular]';
+                    }
+                    seen.add(value);
+                }
+                if (typeof value === 'function') {
+                    return '[Function]';
+                }
+                return value;
+            }, 2);
+            
+            if (stringified && stringified !== '{}' && stringified !== 'null' && stringified !== '[]') {
+                return stringified;
+            }
+        } catch (e) {
+            // JSON.stringify failed, try other methods
+        }
+        
+        // Try to extract meaningful properties
+        if (obj.constructor && obj.constructor.name && obj.constructor.name !== 'Object') {
+            return `${obj.constructor.name} object`;
+        }
+        
+        // Try to get any string properties
+        const stringProps: string[] = [];
+        for (const key in obj) {
+            if (typeof obj[key] === 'string' && obj[key]) {
+                stringProps.push(`${key}: ${obj[key]}`);
+            }
+        }
+        if (stringProps.length > 0) {
+            return stringProps.join(', ');
+        }
+        
+        return null;
+    };
+    
+    // Try error.message first
+    if (error.message !== undefined) {
+        if (typeof error.message === 'string' && error.message) {
+            return error.message;
+        }
+        if (typeof error.message === 'object') {
+            const msg = safeStringify(error.message);
+            if (msg) return msg;
+        }
     }
+    
+    // Try error.body.error.message
+    if (error.body?.error?.message !== undefined) {
+        if (typeof error.body.error.message === 'string' && error.body.error.message) {
+            return error.body.error.message;
+        }
+        if (typeof error.body.error.message === 'object') {
+            const msg = safeStringify(error.body.error.message);
+            if (msg) return msg;
+        }
+    }
+    
+    // Try error.body if it's a string
+    if (error.body && typeof error.body === 'string' && error.body) {
+        return error.body;
+    }
+    
+    // Try to stringify the whole error body if it exists
+    if (error.body && typeof error.body === 'object') {
+        const bodyMsg = safeStringify(error.body);
+        if (bodyMsg) return bodyMsg;
+    }
+    
+    // Try error.response if it exists
+    if (error.response) {
+        const responseMsg = safeStringify(error.response);
+        if (responseMsg) return `Response: ${responseMsg}`;
+    }
+    
+    // Final fallback - use status code if available
+    const statusCode = error.statusCode || error.status;
+    if (statusCode) {
+        return `HTTP ${statusCode}`;
+    }
+    
+    return 'Unknown error';
 }
-
 
 // Types
 export interface SpotifyUser {
@@ -293,10 +375,13 @@ export class SpotifyService {
             saveUsers(this.users);
 
             spotifyLog(`[Spotify] ✅ Token refreshed successfully (expires in ${expiresIn}s)`);
+            
+            // Wait 750ms after token refresh before processing other requests
+            await new Promise(resolve => setTimeout(resolve, 750));
+            
             return true;
         } catch (error: any) {
-            spotifyError(`[Spotify] ❌ Error refreshing token for user ${discordId}:`);
-            spotifyError(`[Spotify] Full error response:\n${formatErrorResponse(error)}`);
+            spotifyError(`[Spotify] ❌ Error refreshing token for user ${discordId}: ${getErrorMessage(error)}`);
             // If refresh fails, user may have revoked access - unlink them
             spotifyWarn(`[Spotify] Token refresh failed for user ${discordId}, they may have revoked access. Unlinking...`);
             this.unlinkUser(discordId);
@@ -305,7 +390,7 @@ export class SpotifyService {
     }
 
     // Get user's Spotify API instance (with refreshed token if needed)
-    async getUserApi(discordId: string): Promise<SpotifyWebApi | null> {
+    async getUserApi(discordId: string, useFreshToken: boolean = false): Promise<SpotifyWebApi | null> {
         const user = this.users.get(discordId);
         if (!user) {
             spotifyWarn(`[Spotify] User ${discordId} not found in users map`);
@@ -316,15 +401,22 @@ export class SpotifyService {
         const timeUntilExpiry = user.expiresAt - now;
         spotifyLog(`[Spotify] Getting API for user ${discordId}, token expires in ${Math.floor(timeUntilExpiry / 1000)}s`);
 
-        const spotifyApi = new SpotifyWebApi({
-            clientId: this.clientId,
-            clientSecret: this.clientSecret,
-            accessToken: user.accessToken,
-            refreshToken: user.refreshToken,
-        });
+        // If useFreshToken is true, get the latest user data (token was just refreshed)
+        let tokenToUse = user.accessToken;
+        let refreshTokenToUse = user.refreshToken;
+        
+        if (useFreshToken) {
+            // Get the most up-to-date user data (token was just refreshed)
+            const freshUser = this.users.get(discordId);
+            if (freshUser) {
+                tokenToUse = freshUser.accessToken;
+                refreshTokenToUse = freshUser.refreshToken;
+                spotifyLog(`[Spotify] Using fresh token for user ${discordId} (expires in ${Math.floor((freshUser.expiresAt - Date.now()) / 1000)}s)`);
+            }
+        }
 
-        // Check if token needs refresh
-        if (now >= user.expiresAt - 60000) { // Refresh 1 minute before expiry
+        // Check if token needs refresh (only if not using fresh token)
+        if (!useFreshToken && now >= user.expiresAt - 60000) { // Refresh 1 minute before expiry
             spotifyLog(`[Spotify] Token for user ${discordId} needs refresh (expires in ${Math.floor(timeUntilExpiry / 1000)}s)`);
             const refreshed = await this.refreshUserToken(discordId);
             if (!refreshed) {
@@ -333,14 +425,22 @@ export class SpotifyService {
             }
             // Get updated user data after refresh
             const updatedUser = this.users.get(discordId);
-            if (updatedUser) {
-                spotifyApi.setAccessToken(updatedUser.accessToken);
-                spotifyLog(`[Spotify] Updated API instance with new token for user ${discordId}`);
-            } else {
+            if (!updatedUser) {
                 spotifyWarn(`[Spotify] User ${discordId} not found after token refresh`);
                 return null;
             }
+            tokenToUse = updatedUser.accessToken;
+            refreshTokenToUse = updatedUser.refreshToken;
+            spotifyLog(`[Spotify] Token refreshed, using new token for user ${discordId} (expires in ${Math.floor((updatedUser.expiresAt - Date.now()) / 1000)}s)`);
         }
+
+        // Create API instance with the token (fresh or current)
+        const spotifyApi = new SpotifyWebApi({
+            clientId: this.clientId,
+            clientSecret: this.clientSecret,
+            accessToken: tokenToUse,
+            refreshToken: refreshTokenToUse,
+        });
 
         return spotifyApi;
     }
@@ -359,7 +459,34 @@ export class SpotifyService {
                 return null;
             }
             
-            let response = await api.getMyCurrentPlayingTrack();
+            // Wrap API call to catch and log full error details for 403 errors
+            let response;
+            try {
+                response = await api.getMyCurrentPlayingTrack();
+            } catch (apiError: any) {
+                // If it's a 403, log the full error details before rethrowing
+                const errorStatusCode = apiError.statusCode || apiError.status;
+                if (errorStatusCode === 403) {
+                    spotifyError(`[Spotify] 403 Forbidden error details for user ${discordId}:`);
+                    spotifyError(`[Spotify] Status: ${errorStatusCode}`);
+                    spotifyError(`[Spotify] Message: ${getErrorMessage(apiError)}`);
+                    if (apiError.body) {
+                        try {
+                            spotifyError(`[Spotify] Error body: ${JSON.stringify(apiError.body, null, 2)}`);
+                        } catch {
+                            spotifyError(`[Spotify] Error body: ${String(apiError.body)}`);
+                        }
+                    }
+                    if (apiError.response) {
+                        try {
+                            spotifyError(`[Spotify] Error response: ${JSON.stringify(apiError.response, null, 2)}`);
+                        } catch {
+                            spotifyError(`[Spotify] Error response: ${String(apiError.response)}`);
+                        }
+                    }
+                }
+                throw apiError; // Re-throw to be handled by outer catch
+            }
             
             // Log response details for debugging
             spotifyLog(`[Spotify] API response for user ${discordId}:`, {
@@ -441,8 +568,7 @@ export class SpotifyService {
                         spotifyWarn(`[Spotify] Auth error fetching artist image for ${artistId}, skipping`);
                     } else {
                         // Other errors - continue without artist image
-                        spotifyWarn(`[Spotify] Could not fetch artist image for ${artistId} (${error.statusCode || 'unknown'}): ${error.message || 'Unknown error'}`);
-                        spotifyWarn(`[Spotify] Full error response:\n${formatErrorResponse(error)}`);
+                        spotifyWarn(`[Spotify] Could not fetch artist image for ${artistId} (${error.statusCode || 'unknown'}): ${getErrorMessage(error)}`);
                     }
                 }
             }
@@ -490,22 +616,82 @@ export class SpotifyService {
             // Convert to number for comparison (handle string "403" vs number 403)
             const statusCodeNum = statusCode ? Number(statusCode) : null;
             
-            spotifyLog(`[Spotify] Error caught for user ${discordId}, statusCode: ${statusCode} (${statusCodeNum}), error keys: ${Object.keys(error || {}).join(', ')}`);
-            spotifyError(`[Spotify] Full error for debugging:\n${formatErrorResponse(error)}`);
-            
             if (statusCodeNum === 403 || statusCode === 403 || statusCode === '403') {
-                spotifyWarn(`[Spotify] Got 403 error for user ${discordId}, attempting token refresh...`);
+                // Log full 403 error details
+                spotifyError(`[Spotify] ⚠️  403 Forbidden error for user ${discordId}:`);
+                spotifyError(`[Spotify] Status Code: ${statusCode}`);
+                spotifyError(`[Spotify] Error Message: ${getErrorMessage(error)}`);
+                
+                // Log error body if available
+                if (error.body) {
+                    try {
+                        const bodyStr = typeof error.body === 'string' 
+                            ? error.body 
+                            : JSON.stringify(error.body, null, 2);
+                        spotifyError(`[Spotify] Error Body: ${bodyStr}`);
+                    } catch {
+                        spotifyError(`[Spotify] Error Body: ${String(error.body)}`);
+                    }
+                }
+                
+                // Log error response if available
+                if (error.response) {
+                    try {
+                        const responseStr = typeof error.response === 'string'
+                            ? error.response
+                            : JSON.stringify(error.response, null, 2);
+                        spotifyError(`[Spotify] Error Response: ${responseStr}`);
+                    } catch {
+                        spotifyError(`[Spotify] Error Response: ${String(error.response)}`);
+                    }
+                }
+                
+                // Log headers if available (might contain useful info)
+                if (error.headers) {
+                    try {
+                        spotifyError(`[Spotify] Error Headers: ${JSON.stringify(error.headers, null, 2)}`);
+                    } catch {
+                        // Skip if can't stringify
+                    }
+                }
+                
+                spotifyWarn(`[Spotify] Attempting token refresh for user ${discordId}...`);
                 
                 // Attempt to refresh the token
                 const refreshed = await this.refreshUserToken(discordId);
                 if (refreshed) {
-                    // Retry the API call with refreshed token
+                    // Retry the API call with refreshed token - force a fresh API instance
                     try {
-                        api = await this.getUserApi(discordId);
+                        // Force refresh to ensure we get a fresh API instance with the new token
+                        api = await this.getUserApi(discordId, true);
                         if (!api) {
+                            spotifyWarn(`[Spotify] Failed to get API instance after token refresh for user ${discordId}`);
                             return null;
                         }
-                        const retryResponse = await api.getMyCurrentPlayingTrack();
+                        
+                        // Wrap retry call to catch and log 403 errors
+                        let retryResponse;
+                        try {
+                            retryResponse = await api.getMyCurrentPlayingTrack();
+                        } catch (retryApiError: any) {
+                            const retryStatusCode = retryApiError.statusCode || retryApiError.status;
+                            if (retryStatusCode === 403) {
+                                spotifyError(`[Spotify] ⚠️  403 Forbidden error on RETRY for user ${discordId}:`);
+                                spotifyError(`[Spotify] Status Code: ${retryStatusCode}`);
+                                spotifyError(`[Spotify] Error Message: ${getErrorMessage(retryApiError)}`);
+                                if (retryApiError.body) {
+                                    try {
+                                        const bodyStr = typeof retryApiError.body === 'string'
+                                            ? retryApiError.body
+                                            : JSON.stringify(retryApiError.body, null, 2);
+                                        spotifyError(`[Spotify] Retry Error Body: ${bodyStr}`);
+                                    } catch {
+                                        spotifyError(`[Spotify] Retry Error Body: ${String(retryApiError.body)}`);
+                                    }
+                                }
+                            }
+                            throw retryApiError; // Re-throw to be handled below
+                        }
                         
                         spotifyLog(`[Spotify] Retry API response for user ${discordId}:`, {
                             statusCode: retryResponse.statusCode,
@@ -567,8 +753,7 @@ export class SpotifyService {
                                 } else if (artistError.statusCode === 403) {
                                     spotifyWarn(`[Spotify] Auth error fetching artist image for ${artistId}, skipping`);
                                 } else {
-                                    spotifyWarn(`[Spotify] Could not fetch artist image for ${artistId} (${artistError.statusCode || 'unknown'}): ${artistError.message || 'Unknown error'}`);
-                                    spotifyWarn(`[Spotify] Full error response:\n${formatErrorResponse(artistError)}`);
+                                    spotifyWarn(`[Spotify] Could not fetch artist image for ${artistId} (${artistError.statusCode || 'unknown'}): ${getErrorMessage(artistError)}`);
                                 }
                             }
                         }
@@ -602,8 +787,9 @@ export class SpotifyService {
                         spotifyLog(`[Spotify] ✅ Successfully retried after token refresh for user ${discordId}`);
                         return track;
                     } catch (retryError: any) {
-                        spotifyError(`[Spotify] ❌ Retry failed after token refresh for user ${discordId}:`);
-                        spotifyError(`[Spotify] Full error response:\n${formatErrorResponse(retryError)}`);
+                        // Only log error if retry failed
+                        const retryStatusCode = retryError.statusCode || retryError.status;
+                        spotifyError(`[Spotify] ❌ Retry failed after token refresh for user ${discordId} (${retryStatusCode || 'unknown'}): ${getErrorMessage(retryError)}`);
                         return null;
                     }
                 } else {
@@ -620,57 +806,9 @@ export class SpotifyService {
                 return null;
             }
             
-            // For other errors, log and return null
-            const errorMessage = error.message || error.body?.error?.message || String(error.message || 'Unknown error');
+            // For other errors (not 403), log and return null
+            const errorMessage = getErrorMessage(error);
             spotifyError(`[Spotify] Error getting currently playing for user ${discordId} (${statusCode || 'unknown'}): ${errorMessage}`);
-            spotifyError(`[Spotify] Full error response:\n${formatErrorResponse(error)}`);
-            
-            // If we got a 403 but didn't catch it above, try refreshing token anyway
-            if (statusCodeNum === 403 || statusCode === 403 || statusCode === '403' || error.statusCode === 403) {
-                spotifyWarn(`[Spotify] Detected 403 in fallback handler for user ${discordId}, attempting token refresh...`);
-                const refreshed = await this.refreshUserToken(discordId);
-                if (refreshed) {
-                    spotifyLog(`[Spotify] Token refreshed in fallback handler, retrying API call...`);
-                    // Retry once more
-                    try {
-                        api = await this.getUserApi(discordId);
-                        if (api) {
-                            const finalRetry = await api.getMyCurrentPlayingTrack();
-                            
-                            if (finalRetry.body?.item && finalRetry.body.item.type === 'track') {
-                                const item = finalRetry.body.item;
-                                const track = {
-                                    name: item.name,
-                                    artist: item.artists.map((a: { name: string }) => a.name).join(', '),
-                                    artistId: item.artists[0]?.id,
-                                    artistImageUrl: undefined,
-                                    album: item.album?.name,
-                                    url: item.external_urls.spotify,
-                                    imageUrl: item.album?.images?.[0]?.url,
-                                    duration: item.duration_ms,
-                                    progress: finalRetry.body.progress_ms || 0,
-                                    isPlaying: finalRetry.body.is_playing || false,
-                                };
-                                
-                                const trackId = `${track.name}|${track.artist}`;
-                                const playing: CurrentlyPlaying = {
-                                    discordId,
-                                    track,
-                                    lastUpdated: Date.now(),
-                                    lastTrackId: trackId,
-                                };
-                                this.currentlyPlaying.set(discordId, playing);
-                                saveCurrentlyPlaying(this.currentlyPlaying);
-                                
-                                spotifyLog(`[Spotify] ✅ Successfully retrieved track after fallback retry for user ${discordId}: "${track.name}" by ${track.artist}`);
-                                return track;
-                            }
-                        }
-                    } catch (finalError: any) {
-                        spotifyError(`[Spotify] Final retry failed for user ${discordId}:`, finalError);
-                    }
-                }
-            }
             
             return null;
         }
@@ -708,8 +846,8 @@ export class SpotifyService {
                     await new Promise(resolve => setTimeout(resolve, 500)); // 500ms delay
                 }
             } catch (error: any) {
-                spotifyError(`[Spotify] Error polling user ${userId}:`);
-                spotifyError(`[Spotify] Full error response:\n${formatErrorResponse(error)}`);
+                const errorStatusCode = error.statusCode || error.status;
+                spotifyError(`[Spotify] Error polling user ${userId} (${errorStatusCode || 'unknown'}): ${getErrorMessage(error)}`);
             }
         }
     }
@@ -808,21 +946,71 @@ export class SpotifyService {
             // Check if it's a 403 Forbidden error (expired/invalid token)
             const statusCode = error.statusCode || (error.body && error.body.error && error.body.error.status);
             if (statusCode === 403) {
-                spotifyWarn(`[Spotify] Got 403 error for top tracks for user ${discordId}, attempting token refresh...`);
+                // Log full 403 error details
+                spotifyError(`[Spotify] ⚠️  403 Forbidden error for top tracks for user ${discordId}:`);
+                spotifyError(`[Spotify] Status Code: ${statusCode}`);
+                spotifyError(`[Spotify] Error Message: ${getErrorMessage(error)}`);
+                if (error.body) {
+                    try {
+                        const bodyStr = typeof error.body === 'string'
+                            ? error.body
+                            : JSON.stringify(error.body, null, 2);
+                        spotifyError(`[Spotify] Error Body: ${bodyStr}`);
+                    } catch {
+                        spotifyError(`[Spotify] Error Body: ${String(error.body)}`);
+                    }
+                }
+                if (error.response) {
+                    try {
+                        const responseStr = typeof error.response === 'string'
+                            ? error.response
+                            : JSON.stringify(error.response, null, 2);
+                        spotifyError(`[Spotify] Error Response: ${responseStr}`);
+                    } catch {
+                        spotifyError(`[Spotify] Error Response: ${String(error.response)}`);
+                    }
+                }
+                
+                spotifyWarn(`[Spotify] Attempting token refresh for top tracks for user ${discordId}...`);
                 
                 // Attempt to refresh the token
                 const refreshed = await this.refreshUserToken(discordId);
                 if (refreshed) {
-                    // Retry the API call with refreshed token
+                    // Retry the API call with refreshed token - force a fresh API instance
                     try {
-                        api = await this.getUserApi(discordId);
+                        // Force refresh to ensure we get a fresh API instance with the new token
+                        api = await this.getUserApi(discordId, true);
                         if (!api) {
+                            spotifyWarn(`[Spotify] Failed to get API instance after token refresh for top tracks for user ${discordId}`);
                             return null;
                         }
-                        const retryResponse = await api.getMyTopTracks({
-                            time_range: timeRange,
-                            limit: limit,
-                        });
+                        
+                        // Wrap retry call to catch and log 403 errors
+                        let retryResponse;
+                        try {
+                            retryResponse = await api.getMyTopTracks({
+                                time_range: timeRange,
+                                limit: limit,
+                            });
+                        } catch (retryApiError: any) {
+                            const retryStatusCode = retryApiError.statusCode || retryApiError.status;
+                            if (retryStatusCode === 403) {
+                                spotifyError(`[Spotify] ⚠️  403 Forbidden error on RETRY for top tracks for user ${discordId}:`);
+                                spotifyError(`[Spotify] Status Code: ${retryStatusCode}`);
+                                spotifyError(`[Spotify] Error Message: ${getErrorMessage(retryApiError)}`);
+                                if (retryApiError.body) {
+                                    try {
+                                        const bodyStr = typeof retryApiError.body === 'string'
+                                            ? retryApiError.body
+                                            : JSON.stringify(retryApiError.body, null, 2);
+                                        spotifyError(`[Spotify] Retry Error Body: ${bodyStr}`);
+                                    } catch {
+                                        spotifyError(`[Spotify] Retry Error Body: ${String(retryApiError.body)}`);
+                                    }
+                                }
+                            }
+                            throw retryApiError; // Re-throw to be handled below
+                        }
 
                         if (!retryResponse.body.items || retryResponse.body.items.length === 0) {
                             return [];
@@ -838,8 +1026,9 @@ export class SpotifyService {
                             popularity: track.popularity || 0,
                         }));
                     } catch (retryError: any) {
-                        spotifyError(`[Spotify] ❌ Retry failed after token refresh for top tracks for user ${discordId}:`);
-                        spotifyError(`[Spotify] Full error response:\n${formatErrorResponse(retryError)}`);
+                        // Only log error if retry failed
+                        const retryStatusCode = retryError.statusCode || retryError.status;
+                        spotifyError(`[Spotify] ❌ Retry failed after token refresh for top tracks for user ${discordId} (${retryStatusCode || 'unknown'}): ${getErrorMessage(retryError)}`);
                         return null;
                     }
                 } else {
@@ -856,10 +1045,9 @@ export class SpotifyService {
                 return null;
             }
             
-            // For other errors, log and return null
-            const errorMessage = error.message || error.body?.error?.message || 'Unknown error';
+            // For other errors (not 403), log and return null
+            const errorMessage = getErrorMessage(error);
             spotifyError(`[Spotify] Error getting top tracks for user ${discordId} (${statusCode || 'unknown'}): ${errorMessage}`);
-            spotifyError(`[Spotify] Full error response:\n${formatErrorResponse(error)}`);
             return null;
         }
     }
@@ -882,4 +1070,5 @@ export function getSpotifyService(): SpotifyService {
     }
     return spotifyServiceInstance;
 }
+
 
